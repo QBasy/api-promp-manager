@@ -4,6 +4,18 @@ import fs from "fs/promises";
 import fastifyStatic from "@fastify/static";
 import path from "path";
 
+interface Question {
+    id: number;
+    text: string;
+    options?: string[];
+}
+
+interface Answer {
+    id: number;
+    question: string;
+    answer: string;
+}
+
 const fastify = Fastify({ logger: true });
 
 // POST /process-html
@@ -29,7 +41,7 @@ fastify.post("/process-html", async (req, reply) => {
 
         // Claude отвечает
         let prompt = "Ответь на вопросы (формат: 1. ответ):\n\n";
-        questions.forEach(q => {
+        questions.forEach((q: Question) => {
             prompt += `${q.id}. ${q.text}\n`;
             if (q.options) prompt += `Варианты: ${q.options.join(", ")}\n`;
         });
@@ -56,15 +68,15 @@ fastify.post("/process-html", async (req, reply) => {
 
         const rawAnswers = gptAnswerRes.data.choices[0].message.content.trim();
 
-        const answers = [];
-        let currentId = null, buffer = "";
-        rawAnswers.split("\n").forEach(line => {
+        const answers: Answer[] = [];
+        let currentId: number | null = null, buffer = "";
+        rawAnswers.split("\n").forEach((line: string) => {
             const match = line.match(/^(\d+)[).:\s]+(.+)/);
             if (match) {
-                if (currentId) {
+                if (currentId !== null) {
                     answers.push({
                         id: currentId,
-                        question: questions.find(q => q.id == currentId)?.text || "",
+                        question: questions.find((q: Question) => q.id == currentId)?.text || "",
                         answer: buffer.trim()
                     });
                 }
@@ -77,7 +89,7 @@ fastify.post("/process-html", async (req, reply) => {
         if (currentId) {
             answers.push({
                 id: currentId,
-                question: questions.find(q => q.id == currentId)?.text || "",
+                question: questions.find((q: Question) => q.id === currentId)?.text || "",
                 answer: buffer.trim()
             });
         }
