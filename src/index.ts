@@ -31,12 +31,13 @@ fastify.post("/process-html", async (req, reply) => {
 
         const $ = cheerio.load(html);
 
-        $('script, style, nav, header, footer, .breadcrumb, .drawer-toggles, .notifications, button, noscript, iframe, svg').remove();
+        $('script, style, nav, header, footer, .breadcrumb, .drawer-toggles, .notifications, button, noscript, iframe, svg, form, input[type="hidden"], link, meta').remove();
 
-        const cleanText = $('body').text()
+        let cleanText = $('body').text()
             .replace(/\s+/g, ' ')
-            .trim()
-            .substring(0, 4000);
+            .trim();
+
+        const textForExtraction = cleanText.substring(0, 4000);
 
         const gptRes = await axios.post(
             "https://api.openai.com/v1/chat/completions",
@@ -44,115 +45,163 @@ fastify.post("/process-html", async (req, reply) => {
                 model: "gpt-4o-mini",
                 messages: [{
                     role: "system",
-                    content: "Ты извлекаешь вопросы из текста. Отвечай ТОЛЬКО валидным JSON без лишнего текста."
+                    content: "Ты извлекаешь вопросы из текста. СТРОГО JSON массив, без комментариев."
                 }, {
                     role: "user",
-                    content: `Найди все вопросы. Верни JSON массив:
-[{"id":1,"text":"вопрос","options":["A","B"]}]
+                    content: `Найди ВСЕ вопросы. Игнорируй навигацию, кнопки, таймеры.
 
-Правила:
-- Только вопросы, игнорируй навигацию
-- Если нет вариантов - не добавляй options
-- Максимум 50 вопросов
-- Текст вопроса - максимум 200 символов
+Формат ответа - ТОЛЬКО массив:
+[{"id":1,"text":"текст вопроса","options":["A","B"]}]
 
-Текст: ${cleanText}`
+Если вариантов нет - НЕ добавляй options.
+
+Текст:
+${textForExtraction}`
                 }],
                 max_tokens: 3000,
-                temperature: 0.1
+                temperature: 0
             },
             { headers: { Authorization: `Bearer ${process.env.OPENAI_KEY}` } }
         );
 
-        let rawQuestions = gptRes.data.choices[0].message.content.trim();
-        rawQuestions = rawQuestions.replace(/^```json\s*/i, '').replace(/```\s*$/i, '').trim();
+        let rawQuestions = gptRes.data.choices[0].message.content
+            .trim()
+            .replace(/^```json\s*/i, '')
+            .replace(/^```\s*/i, '')
+            .replace(/```\s*$/i, '')
+            .trim();
 
         let questions: Question[] = [];
         try {
-            const parsed = JSON.parse(rawQuestions);
-            const arr = Array.isArray(parsed) ? parsed : (parsed.questions || []);
-            questions = arr
-                .filter((q: any) => q && q.text && typeof q.text === 'string' && q.text.trim().length > 0)
+            let parsed = JSON.parse(rawQuestions);
+            if (!Array.isArray(parsed)) {
+                parsed = parsed.questions || [];
+            }
+
+            questions = parsed
+                .filter((q: any) => q?.text?.trim())
                 .slice(0, 50)
                 .map((q: any, idx: number) => ({
                     id: idx + 1,
-                    text: q.text.trim().substring(0, 500),
-                    options: Array.isArray(q.options) ? q.options.slice(0, 10) : undefined
+                    text: String(q.text).trim(),
+                    options: Array.isArray(q.options) ? q.options.slice(0, 8) : undefined
                 }));
         } catch (err) {
             console.error("Parse error:", err);
-            return reply.code(400).send({ error: "Failed to parse questions from GPT", raw: rawQuestions.substring(0, 500) });
+            return reply.code(400).send({
+                error: "Failed to parse questions",
+                raw: rawQuestions.substring(0, 500)
+            });
         }
 
         if (questions.length === 0) {
             return reply.send({ ok: true, count: 0, message: "No questions found" });
         }
 
-        const batches = [];
-        for (let i = 0; i < questions.length; i += 10) {
-            batches.push(questions.slice(i, i + 10));
-        }
-
         const allAnswers: Answer[] = [];
+        const batchSize = 3;
 
-        for (const batch of batches) {
-            let prompt = "Ответь кратко (формат: 1. ответ):\n\n";
+        for (let i = 0; i < questions.length; i += batchSize) {
+            const batch = questions.slice(i, i + batchSize);
+
+            const promptLines: string[] = [];
             batch.forEach(q => {
-                prompt += `${q.id}. ${q.text}\n`;
-                if (q.options) prompt += `Варианты: ${q.options.join(", ")}\n`;
+                promptLines.push(`ВОПРОС ${q.id}: ${q.text}`);
+                if (q.options) {
+                    promptLines.push(`ВАРИАНТЫ: ${q.options.join(" | ")}`);
+                }
+                promptLines.push('---');
             });
+
+            const prompt = `Ответь на каждый вопрос КРАТКО и ПО СУЩЕСТВУ.
+
+Формат ответа СТРОГО:
+${batch.map(q => `${q.id}. [твой ответ здесь]`).join('\n')}
+
+НЕ пиши ничего кроме номера и ответа.
+НЕ переформулируй вопросы.
+НЕ добавляй пояснения.
+
+${promptLines.join('\n')}
+
+ОТВЕТЫ:`;
 
             const gptAnswerRes = await axios.post(
                 "https://api.openai.com/v1/chat/completions",
                 {
                     model: "gpt-4o-mini",
-                    messages: [{ role: "user", content: prompt }],
-                    max_tokens: 1000
+                    messages: [
+                        {
+                            role: "system",
+                            content: "Ты отвечаешь кратко и точно на вопросы. Формат: \"1. ответ\". БЕЗ лишнего текста."
+                        },
+                        {
+                            role: "user",
+                            content: prompt
+                        }
+                    ],
+                    max_tokens: 600,
+                    temperature: 0.2
                 },
                 { headers: { Authorization: `Bearer ${process.env.OPENAI_KEY}` } }
             );
 
             const rawAnswers = gptAnswerRes.data.choices[0].message.content.trim();
 
-            let currentId: number | null = null, buffer = "";
-            rawAnswers.split("\n").forEach((line: string) => {
-                const match = line.match(/^(\d+)[).:\s]+(.+)/);
+            const lines = rawAnswers.split('\n');
+            let currentId: number | null = null;
+            let buffer = "";
+
+            for (const line of lines) {
+                const match = line.match(/^(\d+)[\.\)\:\s]+(.+)/);
                 if (match) {
-                    if (currentId !== null && buffer.trim() !== "") {
-                        allAnswers.push({
-                            id: currentId,
-                            question: questions.find(q => q.id === currentId)?.text || "",
-                            answer: buffer.trim()
-                        });
+                    if (currentId !== null && buffer.trim()) {
+                        const question = questions.find(q => q.id === currentId);
+                        if (question) {
+                            allAnswers.push({
+                                id: currentId,
+                                question: question.text,
+                                answer: buffer.trim()
+                            });
+                        }
                     }
                     currentId = parseInt(match[1]);
                     buffer = match[2];
-                } else if (currentId) {
+                } else if (currentId && line.trim() && !line.includes('ВОПРОС')) {
                     buffer += " " + line.trim();
                 }
-            });
-
-            if (currentId !== null && buffer.trim() !== "") {
-                allAnswers.push({
-                    id: currentId,
-                    question: questions.find(q => q.id === currentId)?.text || "",
-                    answer: buffer.trim()
-                });
             }
+
+            if (currentId !== null && buffer.trim()) {
+                const question = questions.find(q => q.id === currentId);
+                if (question) {
+                    allAnswers.push({
+                        id: currentId,
+                        question: question.text,
+                        answer: buffer.trim()
+                    });
+                }
+            }
+
+            await new Promise(resolve => setTimeout(resolve, 500));
         }
 
         let existing: Answer[] = [];
         try {
             const fileContent = await fs.readFile(answersPath, "utf-8");
-            existing = JSON.parse(fileContent) as Answer[];
+            existing = JSON.parse(fileContent);
         } catch {}
 
         await fs.writeFile(answersPath, JSON.stringify([...existing, ...allAnswers], null, 2));
 
-        return reply.send({ ok: true, count: allAnswers.length, questions: questions.length });
+        return reply.send({
+            ok: true,
+            count: allAnswers.length,
+            totalQuestions: questions.length
+        });
 
     } catch (err: any) {
-        console.error(err);
+        console.error("Error:", err.message);
         return reply.code(500).send({ error: err.message });
     }
 });
@@ -162,7 +211,7 @@ fastify.register(fastifyStatic, { root: path.join(process.cwd(), "static"), pref
 fastify.get("/json", async (req, reply) => {
     try {
         const fileContent = await fs.readFile(answersPath, "utf-8");
-        const answers = JSON.parse(fileContent) as Answer[];
+        const answers = JSON.parse(fileContent);
         reply.header("Content-Type", "application/json").send(answers);
     } catch {
         reply.code(404).send({ error: "answers.json not found" });
@@ -172,9 +221,8 @@ fastify.get("/json", async (req, reply) => {
 fastify.post("/clear-answers", async (req, reply) => {
     try {
         await fs.writeFile(answersPath, "[]", "utf-8");
-        return reply.send({ ok: true, message: "answers.json очищен" });
+        return reply.send({ ok: true, message: "Cleared" });
     } catch (err: any) {
-        console.error(err);
         return reply.code(500).send({ error: err.message });
     }
 });
