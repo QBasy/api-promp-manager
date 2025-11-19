@@ -1,0 +1,61 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+    <meta charset="UTF-8">
+    <title>Answers</title>
+    <style>
+        body {
+            font-family: Arial, sans-serif;
+            padding: 20px;
+            line-height: 1.6;
+            max-width: 900px;
+            margin: auto;
+        }
+
+        .answer-block {
+            border: 1px solid #ccc;
+            padding: 15px;
+            margin-bottom: 20px;
+            border-radius: 8px;
+            background: #f9f9f9;
+        }
+
+        .question {
+            font-weight: bold;
+            margin-bottom: 10px;
+        }
+
+        .answer {
+            white-space: pre-wrap;
+        }
+    </style>
+</head>
+<body>
+
+<h1>Generated Answers</h1>
+<div id="answers"></div>
+
+<script>
+    fetch('/answers.json')
+        .then(res => res.json())
+        .then(data => {
+            const container = document.getElementById('answers');
+
+            data.forEach(item => {
+                const block = document.createElement('div');
+                block.className = 'answer-block';
+                block.innerHTML = `
+                <div class="question">${item.question}</div>
+                <div class="answer">${item.answer}</div>
+            `;
+                container.appendChild(block);
+            });
+        })
+        .catch(err => {
+            document.getElementById('answers').innerHTML =
+                "<p style='color:red'>Ошибка загрузки answers.json</p>";
+        });
+</script>
+
+</body>
+</html>
