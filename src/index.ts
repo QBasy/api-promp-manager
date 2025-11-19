@@ -43,9 +43,13 @@ fastify.post("/process-html", async (req, reply) => {
             { headers: { Authorization: `Bearer ${process.env.OPENAI_KEY}` } }
         );
 
-        const { questions } = JSON.parse(gptRes.data.choices[0].message.content.trim());
+        let rawQuestions = gptRes.data.choices[0].message.content.trim();
+        rawQuestions = rawQuestions.replace(/^```json\s*/, '').replace(/```$/, '').trim();
 
-        // Claude отвечает
+        console.log("Raw GPT questions:", rawQuestions);
+
+        const { questions } = JSON.parse(rawQuestions);
+
         let prompt = "Ответь на вопросы (формат: 1. ответ):\n\n";
         questions.forEach((q: Question) => {
             prompt += `${q.id}. ${q.text}\n`;
