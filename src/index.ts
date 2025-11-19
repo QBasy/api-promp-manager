@@ -2,6 +2,7 @@ import Fastify from "fastify";
 import axios from "axios";
 import fs from "fs/promises";
 import fastifyStatic from "@fastify/static";
+import fastifyCors from '@fastify/cors';
 import path from "path";
 
 interface Question {
@@ -17,6 +18,11 @@ interface Answer {
 }
 
 const fastify = Fastify({ logger: true });
+
+fastify.register(fastifyCors, {
+    origin: "*",
+});
+
 
 // POST /process-html
 fastify.post("/process-html", async (req, reply) => {
