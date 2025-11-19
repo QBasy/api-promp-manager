@@ -2,59 +2,138 @@
 <html lang="en">
 <head>
     <meta charset="UTF-8">
-    <title>Answers</title>
+    <title>Generated Answers</title>
+    <meta name="viewport" content="width=device-width, initial-scale=1.0">
     <style>
         body {
             font-family: Arial, sans-serif;
-            padding: 20px;
-            line-height: 1.6;
-            max-width: 900px;
+            padding: 10px;
+            max-width: 600px;
             margin: auto;
+            line-height: 1.4;
+            font-size: 12px;
+        }
+
+        h1, h2 {
+            font-size: 16px;
         }
 
         .answer-block {
             border: 1px solid #ccc;
-            padding: 15px;
-            margin-bottom: 20px;
-            border-radius: 8px;
+            padding: 8px;
+            margin-bottom: 10px;
+            border-radius: 6px;
             background: #f9f9f9;
         }
 
         .question {
             font-weight: bold;
-            margin-bottom: 10px;
+            margin-bottom: 6px;
+            font-size: 12px;
         }
 
         .answer {
             white-space: pre-wrap;
+            font-size: 12px;
+        }
+
+        .error {
+            color: red;
+            font-size: 12px;
+        }
+
+        .raw-json {
+            background: #f0f0f0;
+            border: 1px solid #ccc;
+            padding: 8px;
+            margin-top: 20px;
+            border-radius: 6px;
+            white-space: pre-wrap;
+            font-family: monospace;
+            font-size: 10px;
+        }
+
+        button {
+            padding: 6px 12px;
+            font-size: 12px;
+            margin-bottom: 20px;
+            border-radius: 5px;
+            cursor: pointer;
+        }
+
+        @media (max-width: 400px) {
+            body {
+                font-size: 10px;
+            }
+            h1, h2 {
+                font-size: 14px;
+            }
+            button {
+                font-size: 10px;
+                padding: 4px 8px;
+            }
         }
     </style>
 </head>
 <body>
 
 <h1>Generated Answers</h1>
+
+<button id="clearBtn">Очистить ответы</button>
+
 <div id="answers"></div>
 
+<h2>Raw JSON (for debugging)</h2>
+<div id="rawAnswers" class="raw-json"></div>
+
 <script>
-    fetch('/answers.json')
-        .then(res => res.json())
-        .then(data => {
+    async function loadAnswers() {
+        try {
+            const res = await fetch('/answers.json');
+            if (!res.ok) throw new Error(`HTTP error ${res.status}`);
+            const data = await res.json();
+
             const container = document.getElementById('answers');
+            const rawContainer = document.getElementById('rawAnswers');
+
+            rawContainer.textContent = JSON.stringify(data, null, 2);
+
+            container.innerHTML = '';
+            if (!Array.isArray(data) || data.length === 0) {
+                container.innerHTML = "<p class='error'>No answers found.</p>";
+                return;
+            }
 
             data.forEach(item => {
                 const block = document.createElement('div');
                 block.className = 'answer-block';
                 block.innerHTML = `
-                <div class="question">${item.question}</div>
-                <div class="answer">${item.answer}</div>
-            `;
+                    <div class="question">Q${item.id}: ${item.question}</div>
+                    <div class="answer">${item.answer}</div>
+                `;
                 container.appendChild(block);
             });
-        })
-        .catch(err => {
-            document.getElementById('answers').innerHTML =
-                "<p style='color:red'>Ошибка загрузки answers.json</p>";
-        });
+        } catch (err) {
+            const container = document.getElementById('answers');
+            const rawContainer = document.getElementById('rawAnswers');
+            container.innerHTML = `<p class='error'>Ошибка загрузки answers.json: ${err.message}</p>`;
+            rawContainer.textContent = '';
+            console.error(err);
+        }
+    }
+
+    document.getElementById('clearBtn').addEventListener('click', async () => {
+        try {
+            const res = await fetch('/clear-answers', { method: 'POST' });
+            if (!res.ok) throw new Error(`HTTP error ${res.status}`);
+            await loadAnswers();
+        } catch (err) {
+            console.error(err);
+            alert('Ошибка при очистке ответов: ' + err.message);
+        }
+    });
+
+    loadAnswers();
 </script>
 
 </body>

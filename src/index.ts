@@ -4,6 +4,8 @@ import fs from "fs/promises";
 import fastifyStatic from "@fastify/static";
 import fastifyCors from '@fastify/cors';
 import path from "path";
+import 'dotenv/config';
+import * as cheerio from 'cheerio';
 
 interface Question {
     id: number;
@@ -18,97 +20,137 @@ interface Answer {
 }
 
 const fastify = Fastify({ logger: true });
+fastify.register(fastifyCors, { origin: "*" });
 
-fastify.register(fastifyCors, {
-    origin: "*",
-});
+const answersPath = path.join(process.cwd(), "static", "answers.json");
 
-
-// POST /process-html
 fastify.post("/process-html", async (req, reply) => {
     try {
         const { html } = req.body as { html?: string };
         if (!html) return reply.code(400).send({ error: "html required" });
 
-        // GPT извлекает вопросы
+        const $ = cheerio.load(html);
+
+        $('script, style, nav, header, footer, .breadcrumb, .drawer-toggles, .notifications, button, noscript, iframe, svg').remove();
+
+        const cleanText = $('body').text()
+            .replace(/\s+/g, ' ')
+            .trim()
+            .substring(0, 4000);
+
         const gptRes = await axios.post(
             "https://api.openai.com/v1/chat/completions",
             {
                 model: "gpt-4o-mini",
                 messages: [{
+                    role: "system",
+                    content: "Ты извлекаешь вопросы из текста. Отвечай ТОЛЬКО валидным JSON без лишнего текста."
+                }, {
                     role: "user",
-                    content: `Извлеки вопросы из HTML. Верни ТОЛЬКО JSON:\n{"questions":[{"id":1,"text":"...","options":["A","B"]}]}\n\nHTML:\n${html}`
-                }]
+                    content: `Найди все вопросы. Верни JSON массив:
+[{"id":1,"text":"вопрос","options":["A","B"]}]
+
+Правила:
+- Только вопросы, игнорируй навигацию
+- Если нет вариантов - не добавляй options
+- Максимум 50 вопросов
+- Текст вопроса - максимум 200 символов
+
+Текст: ${cleanText}`
+                }],
+                max_tokens: 3000,
+                temperature: 0.1
             },
             { headers: { Authorization: `Bearer ${process.env.OPENAI_KEY}` } }
         );
 
         let rawQuestions = gptRes.data.choices[0].message.content.trim();
-        rawQuestions = rawQuestions.replace(/^```json\s*/, '').replace(/```$/, '').trim();
+        rawQuestions = rawQuestions.replace(/^```json\s*/i, '').replace(/```\s*$/i, '').trim();
 
-        console.log("Raw GPT questions:", rawQuestions);
-
-        const { questions } = JSON.parse(rawQuestions);
-
-        let prompt = "Ответь на вопросы (формат: 1. ответ):\n\n";
-        questions.forEach((q: Question) => {
-            prompt += `${q.id}. ${q.text}\n`;
-            if (q.options) prompt += `Варианты: ${q.options.join(", ")}\n`;
-        });
-
-        const gptAnswerRes = await axios.post(
-            "https://api.openai.com/v1/chat/completions",
-            {
-                model: "gpt-4o-mini",
-                messages: [
-                    {
-                        role: "user",
-                        content: prompt
-                    }
-                ],
-                max_tokens: 2000
-            },
-            {
-                headers: {
-                    "Authorization": `Bearer ${process.env.OPENAI_KEY}`,
-                    "Content-Type": "application/json"
-                }
-            }
-        );
-
-        const rawAnswers = gptAnswerRes.data.choices[0].message.content.trim();
-
-        const answers: Answer[] = [];
-        let currentId: number | null = null, buffer = "";
-        rawAnswers.split("\n").forEach((line: string) => {
-            const match = line.match(/^(\d+)[).:\s]+(.+)/);
-            if (match) {
-                if (currentId !== null) {
-                    answers.push({
-                        id: currentId,
-                        question: questions.find((q: Question) => q.id == currentId)?.text || "",
-                        answer: buffer.trim()
-                    });
-                }
-                currentId = parseInt(match[1]);
-                buffer = match[2];
-            } else if (currentId) {
-                buffer += " " + line;
-            }
-        });
-        if (currentId) {
-            answers.push({
-                id: currentId,
-                question: questions.find((q: Question) => q.id === currentId)?.text || "",
-                answer: buffer.trim()
-            });
+        let questions: Question[] = [];
+        try {
+            const parsed = JSON.parse(rawQuestions);
+            const arr = Array.isArray(parsed) ? parsed : (parsed.questions || []);
+            questions = arr
+                .filter((q: any) => q && q.text && typeof q.text === 'string' && q.text.trim().length > 0)
+                .slice(0, 50)
+                .map((q: any, idx: number) => ({
+                    id: idx + 1,
+                    text: q.text.trim().substring(0, 500),
+                    options: Array.isArray(q.options) ? q.options.slice(0, 10) : undefined
+                }));
+        } catch (err) {
+            console.error("Parse error:", err);
+            return reply.code(400).send({ error: "Failed to parse questions from GPT", raw: rawQuestions.substring(0, 500) });
         }
 
-        let existing: any[] = [];
-        try { existing = JSON.parse(await fs.readFile("./answers.json", "utf-8")); } catch {}
-        await fs.writeFile("./answers.json", JSON.stringify([...existing, ...answers], null, 2));
+        if (questions.length === 0) {
+            return reply.send({ ok: true, count: 0, message: "No questions found" });
+        }
 
-        return reply.send({ ok: true, count: answers.length });
+        const batches = [];
+        for (let i = 0; i < questions.length; i += 10) {
+            batches.push(questions.slice(i, i + 10));
+        }
+
+        const allAnswers: Answer[] = [];
+
+        for (const batch of batches) {
+            let prompt = "Ответь кратко (формат: 1. ответ):\n\n";
+            batch.forEach(q => {
+                prompt += `${q.id}. ${q.text}\n`;
+                if (q.options) prompt += `Варианты: ${q.options.join(", ")}\n`;
+            });
+
+            const gptAnswerRes = await axios.post(
+                "https://api.openai.com/v1/chat/completions",
+                {
+                    model: "gpt-4o-mini",
+                    messages: [{ role: "user", content: prompt }],
+                    max_tokens: 1000
+                },
+                { headers: { Authorization: `Bearer ${process.env.OPENAI_KEY}` } }
+            );
+
+            const rawAnswers = gptAnswerRes.data.choices[0].message.content.trim();
+
+            let currentId: number | null = null, buffer = "";
+            rawAnswers.split("\n").forEach((line: string) => {
+                const match = line.match(/^(\d+)[).:\s]+(.+)/);
+                if (match) {
+                    if (currentId !== null && buffer.trim() !== "") {
+                        allAnswers.push({
+                            id: currentId,
+                            question: questions.find(q => q.id === currentId)?.text || "",
+                            answer: buffer.trim()
+                        });
+                    }
+                    currentId = parseInt(match[1]);
+                    buffer = match[2];
+                } else if (currentId) {
+                    buffer += " " + line.trim();
+                }
+            });
+
+            if (currentId !== null && buffer.trim() !== "") {
+                allAnswers.push({
+                    id: currentId,
+                    question: questions.find(q => q.id === currentId)?.text || "",
+                    answer: buffer.trim()
+                });
+            }
+        }
+
+        let existing: Answer[] = [];
+        try {
+            const fileContent = await fs.readFile(answersPath, "utf-8");
+            existing = JSON.parse(fileContent) as Answer[];
+        } catch {}
+
+        await fs.writeFile(answersPath, JSON.stringify([...existing, ...allAnswers], null, 2));
+
+        return reply.send({ ok: true, count: allAnswers.length, questions: questions.length });
+
     } catch (err: any) {
         console.error(err);
         return reply.code(500).send({ error: err.message });
@@ -116,11 +158,25 @@ fastify.post("/process-html", async (req, reply) => {
 });
 
 fastify.register(fastifyStatic, { root: path.join(process.cwd(), "static"), prefix: "/" });
+
 fastify.get("/json", async (req, reply) => {
     try {
-        const data = await fs.readFile("./answers.json", "utf-8");
-        reply.header("Content-Type", "application/json").send(data);
-    } catch { reply.code(404).send({ error: "answers.json not found" }); }
+        const fileContent = await fs.readFile(answersPath, "utf-8");
+        const answers = JSON.parse(fileContent) as Answer[];
+        reply.header("Content-Type", "application/json").send(answers);
+    } catch {
+        reply.code(404).send({ error: "answers.json not found" });
+    }
+});
+
+fastify.post("/clear-answers", async (req, reply) => {
+    try {
+        await fs.writeFile(answersPath, "[]", "utf-8");
+        return reply.send({ ok: true, message: "answers.json очищен" });
+    } catch (err: any) {
+        console.error(err);
+        return reply.code(500).send({ error: err.message });
+    }
 });
 
 const PORT = parseInt(process.env.PORT || "3000");
