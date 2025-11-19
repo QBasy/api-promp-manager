@@ -26,6 +26,7 @@ const answersPath = path.join(process.cwd(), "static", "answers.json");
 
 fastify.post("/process-html", async (req, reply) => {
     try {
+        console.log(process.env.OPENAI_KEY ? "OpenAI key found" : "OpenAI key MISSING");
         const { html } = req.body as { html?: string };
         if (!html) return reply.code(400).send({ error: "html required" });
 
