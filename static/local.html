@@ -1,0 +1,53 @@
+<!DOCTYPE html>
+<html lang="ru">
+<head>
+    <meta charset="UTF-8">
+    <title>GPT Image Chat</title>
+    <style>
+        body { font-family: Arial; margin: 2rem; }
+        input, button { margin: 0.5rem 0; }
+        pre { background: #f0f0f0; padding: 1rem; }
+    </style>
+</head>
+<body>
+<h1>GPT Image Chat</h1>
+<input type="file" id="fileInput" accept="image/*" />
+<button id="sendBtn">Отправить</button>
+<pre id="result"></pre>
+
+<script>
+    const fileInput = document.getElementById('fileInput');
+    const sendBtn = document.getElementById('sendBtn');
+    const resultEl = document.getElementById('result');
+
+    sendBtn.addEventListener('click', async () => {
+        if (!fileInput.files.length) {
+            alert('Выберите картинку');
+            return;
+        }
+
+        const formData = new FormData();
+        formData.append('file', fileInput.files[0]);
+
+        resultEl.textContent = 'Идёт обработка...';
+
+        try {
+            const res = await fetch('/ask-image-gpt', {
+                method: 'POST',
+                body: formData
+            });
+            const data = await res.json();
+            if (data.text) {
+                resultEl.textContent = data.text;
+            } else if (data.error) {
+                resultEl.textContent = 'Ошибка: ' + data.error;
+            } else {
+                resultEl.textContent = 'Нет ответа';
+            }
+        } catch (err) {
+            resultEl.textContent = 'Ошибка сети: ' + err.message;
+        }
+    });
+</script>
+</body>
+</html>
